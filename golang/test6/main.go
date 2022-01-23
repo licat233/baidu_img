@@ -47,9 +47,10 @@ func (s *Spider_baidu_image) run() {
 		fmt.Println("耗时:", terminal)
 	}(time.Now())
 	for _, url := range s.QueryUrls {
-		s.newGoroutine(s.newQuerySpider(), url)
+		s.newGoroutine(s.QueryColly, url)
 	}
 	globalWG.Wait()
+	s.DownloadColly.Wait()
 	if saveNum := s.fileNum(); saveNum != 0 {
 		fmt.Printf("【%d】张《%s》的图片已下载完成！\n保存位置%s\n", saveNum, s.SearchKeyword, s.ImgDir)
 	} else {
@@ -144,25 +145,12 @@ func newSpider() *Spider_baidu_image {
 		collyHeaders.Add(k, v)
 	}
 
-	s := &Spider_baidu_image{
-		TcpNumRWMux:   &sync.RWMutex{},
-		SearchKeyword: keyword,
-		SearchNumber:  number,
-		ImgDir:        imgSaveDir,
-		TcpNum:        0,
-		CollyHeaders:  collyHeaders,
-		QueryUrls:     queryUrls,
-	}
-	return s
-}
-
-func (s *Spider_baidu_image) newDownSpider() *colly.Collector {
-	downloadColly := colly.NewCollector()
+	downloadColly := colly.NewCollector(colly.UserAgent(UA), colly.Async(true))
 	downloadColly.OnResponse(func(resp *colly.Response) {
 		globalWG.Add(1)
 		//异步保存图片
 		go func(resp *colly.Response) {
-			if err := resp.Save(fmt.Sprintf("%s/%d.jpg", s.ImgDir, time.Now().Local().UnixNano())); err != nil {
+			if err := resp.Save(fmt.Sprintf("%s/%d.jpg", imgSaveDir, time.Now().Local().UnixNano())); err != nil {
 				fmt.Println("图片保存失败:", err.Error())
 			}
 			defer globalWG.Done()
@@ -171,11 +159,20 @@ func (s *Spider_baidu_image) newDownSpider() *colly.Collector {
 	downloadColly.OnError(func(resp *colly.Response, err error) {
 		fmt.Printf("下载图片%s失败:%s\n", resp.Request.URL, err)
 	})
-	return downloadColly
-}
 
-func (s *Spider_baidu_image) newQuerySpider() *colly.Collector {
-	queryColly := colly.NewCollector()
+	s := &Spider_baidu_image{
+		TcpNumRWMux:   &sync.RWMutex{},
+		SearchKeyword: keyword,
+		SearchNumber:  number,
+		ImgDir:        imgSaveDir,
+		TcpNum:        0,
+		CollyHeaders:  collyHeaders,
+		QueryUrls:     queryUrls,
+		DownloadColly: downloadColly,
+		QueryColly:    nil,
+	}
+
+	queryColly := colly.NewCollector(colly.Async(true))
 	queryColly.OnRequest(func(r *colly.Request) {
 		*r.Headers = *s.CollyHeaders
 	})
@@ -183,18 +180,22 @@ func (s *Spider_baidu_image) newQuerySpider() *colly.Collector {
 		var respinfo RespJson
 		if err := json.Unmarshal(resp.Body, &respinfo); err != nil {
 			fmt.Println("json.Unmarshal failed:", err)
+			fmt.Println("request url:", resp.Request.URL.String())
+			resp.Save(CurrentPath + "/body.txt")
+			// fmt.Println("content:", string(resp.Body))
 			return
 		}
 		for _, v := range respinfo.Data {
-			s.newGoroutine(s.newDownSpider(), v.Url)
+			s.newGoroutine(s.DownloadColly, v.Url)
 		}
 	})
 
 	queryColly.OnError(func(resp *colly.Response, err error) {
-		// queryColly.Visit(resp.Request.URL.String())
-		fmt.Printf("请求链接%s失败:%s\n", resp.Request.URL, err)
+		queryColly.Visit(resp.Request.URL.String())
+		// fmt.Printf("请求链接%s失败:%s\n", resp.Request.URL, err)
 	})
-	return queryColly
+	s.QueryColly = queryColly
+	return s
 }
 
 //并发函数,用于集中控制TCP数量，以及管理并发
@@ -243,6 +244,8 @@ type Spider_baidu_image struct {
 	TcpNum        int
 	CollyHeaders  *http.Header
 	QueryUrls     []string
+	DownloadColly *colly.Collector
+	QueryColly    *colly.Collector
 }
 
 type RespJson struct {
